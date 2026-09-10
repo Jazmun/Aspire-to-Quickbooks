@@ -14,21 +14,30 @@ st.write("Upload an invoice PDF to extract line items and export directly into y
 
 uploaded_file = st.file_uploader("Choose an Invoice PDF", type=["pdf"])
 
-def clean_description_block(desc_text):
-    """Cleans up the description text block and removes table headers/footers."""
+def extract_invoice_number(text):
+    """Detects invoice number across different template styles."""
+    # Alternate layout (e.g. Date Invoice No. \n 09/10/26 1246)
+    m2 = re.search(r'Invoice\s+No\.\s*\n\s*(?:[0-9/]+\s+)?(\d+)', text, re.IGNORECASE)
+    if m2:
+        return m2.group(1)
+    # Standard layout (e.g. Invoice 1245)
+    m1 = re.search(r'Invoice\s+(\d+)', text)
+    if m1:
+        return m1.group(1)
+    return None
+
+def clean_description(desc_text):
+    """Cleans up the standard description block and removes table headers/footers."""
     lines = desc_text.split('\n')
     cleaned = []
     for l in lines:
         s = l.strip()
         if not s:
             continue
-        # Drop table header lines
         if "Description Qty / UOM" in s or s == "Description":
             continue
-        # Drop footer phone/website lines
         if "713-657-0875" in s or "lasallelandscaping.com" in s:
             continue
-        # Strip trailing price from the line if present (e.g. "Plant Installation ... $747.50")
         m_amt = re.search(r'\s+\$([\d,]+\.\d{2})$', s)
         if m_amt:
             s = s[:m_amt.start()].strip()
@@ -39,19 +48,17 @@ def clean_description_block(desc_text):
 
 def parse_invoices(pdf_bytes):
     reader = pypdf.PdfReader(BytesIO(pdf_bytes))
-    
-    # Group pages by invoice (handles multi-page invoices like 1235, 1236, etc.)
     invoices = []
     current_inv = None
 
     for page in reader.pages:
         text = page.extract_text() or ""
-        m = re.search(r'Invoice\s+(\d+)', text)
-        if m:
+        inv_num = extract_invoice_number(text)
+        if inv_num:
             if current_inv:
                 invoices.append(current_inv)
             current_inv = {
-                'inv_num': m.group(1),
+                'inv_num': inv_num,
                 'pages': [text]
             }
         else:
@@ -67,62 +74,135 @@ def parse_invoices(pdf_bytes):
         full_text = "\n".join(inv['pages'])
         inv_num = inv['inv_num']
 
-        # 1. Invoice Date & Terms -> Due Date
-        date_match = re.search(r'Date\s+PO#\s*\n\s*([0-9/]+)', full_text)
         inv_date_str = ""
         due_date_str = ""
-        if date_match:
-            raw_date = date_match.group(1).strip()
+
+        # Format 2 (Alternate layout)
+        f2_date = re.search(r'Date\s+Invoice\s+No\.\s*\n\s*([0-9/]+)', full_text, re.IGNORECASE)
+        f2_due = re.search(r'Due\s+Date\s*\n\s*.*?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})', full_text, re.IGNORECASE)
+
+        if f2_date:
             try:
-                dt = datetime.strptime(raw_date, "%m/%d/%y")
+                dt = datetime.strptime(f2_date.group(1).strip(), "%m/%d/%y")
                 inv_date_str = f"{dt.month}/{dt.day}/{dt.year}"
-                if "Due on Receipt" in full_text:
-                    due_date_str = f"{dt.month}/{dt.day:02d}/{dt.year}"
-                else:  # Net 30
-                    due_dt = dt + timedelta(days=30)
-                    due_date_str = f"{due_dt.month}/{due_dt.day:02d}/{due_dt.year}"
             except:
-                inv_date_str = raw_date
-                due_date_str = raw_date
+                inv_date_str = f2_date.group(1).strip()
+            if f2_due:
+                try:
+                    due_dt = datetime.strptime(f2_due.group(1).strip(), "%m/%d/%y")
+                    due_date_str = f"{due_dt.month}/{due_dt.day:02d}/{due_dt.year}"
+                except:
+                    due_date_str = f2_due.group(1).strip()
+        else:
+            # Format 1 (Standard layout)
+            date_match = re.search(r'Date\s+PO#\s*\n\s*([0-9/]+)', full_text)
+            if date_match:
+                try:
+                    dt = datetime.strptime(date_match.group(1).strip(), "%m/%d/%y")
+                    inv_date_str = f"{dt.month}/{dt.day}/{dt.year}"
+                    if "Due on Receipt" in full_text:
+                        due_date_str = f"{dt.month}/{dt.day:02d}/{dt.year}"
+                    else:
+                        due_dt = dt + timedelta(days=30)
+                        due_date_str = f"{due_dt.month}/{due_dt.day:02d}/{due_dt.year}"
+                except:
+                    inv_date_str = date_match.group(1).strip()
+                    due_date_str = inv_date_str
 
-        # 2. Customer: Extract the first line of Property Address
+        # Customer: Extract first line of Property Address
         cust = ""
-        bt_idx = full_text.find("Bill To Property Address")
-        desc_idx = full_text.find("Description", bt_idx) if bt_idx != -1 else -1
-        if bt_idx != -1 and desc_idx != -1:
-            addr_block = full_text[bt_idx + len("Bill To Property Address"):desc_idx]
-            addr_lines = [l.strip() for l in addr_block.split('\n') if l.strip()]
-            # Bill To block finishes at the first City/State/Zip line (e.g. TX 77075)
-            # The line right after is the first line of Property Address (the customer name)
-            found_zip_idx = -1
-            for i, l in enumerate(addr_lines):
+        if "BILL TO PROPERTY" in full_text:
+            bt_idx = full_text.find("BILL TO PROPERTY")
+            end_idx = full_text.find("Amount Due", bt_idx)
+            if end_idx == -1:
+                end_idx = full_text.find("Please detach", bt_idx)
+            block = full_text[bt_idx + len("BILL TO PROPERTY"):end_idx]
+            lines = [l.strip() for l in block.split('\n') if l.strip()]
+            found_zip = -1
+            for i, l in enumerate(lines):
                 if re.search(r'[A-Z]{2}\s+\d{5}', l):
-                    found_zip_idx = i
+                    found_zip = i
                     break
-            if found_zip_idx != -1 and found_zip_idx + 1 < len(addr_lines):
-                cust = addr_lines[found_zip_idx + 1]
-            elif addr_lines:
-                cust = addr_lines[0]
+            if found_zip != -1 and found_zip + 1 < len(lines):
+                cust = lines[found_zip + 1]
+            elif lines:
+                cust = lines[0]
+        else:
+            bt_idx = full_text.find("Bill To Property Address")
+            desc_idx = full_text.find("Description", bt_idx) if bt_idx != -1 else -1
+            if bt_idx != -1 and desc_idx != -1:
+                addr_block = full_text[bt_idx + len("Bill To Property Address"):desc_idx]
+                addr_lines = [l.strip() for l in addr_block.split('\n') if l.strip()]
+                found_zip_idx = -1
+                for i, l in enumerate(addr_lines):
+                    if re.search(r'[A-Z]{2}\s+\d{5}', l):
+                        found_zip_idx = i
+                        break
+                if found_zip_idx != -1 and found_zip_idx + 1 < len(addr_lines):
+                    cust = addr_lines[found_zip_idx + 1]
+                elif addr_lines:
+                    cust = addr_lines[0]
 
-        # 3. Subtotal / Unit Price
-        sub_match = re.search(r'Subtotal\s*\$?([\d,]+\.\d{2})', full_text)
-        unit_price = float(sub_match.group(1).replace(',', '')) if sub_match else 0.0
-
-        # 4. Tax
-        tax_match = re.search(r'Sales Tax\s*\$?([\d,]+\.\d{2})', full_text)
+        # Unit Price & Tax
+        unit_price = 0.0
         has_tax = "No"
-        if tax_match:
-            t_val = float(tax_match.group(1).replace(',', ''))
-            if t_val > 0:
-                has_tax = "Yes"
 
-        # 5. Full Description
-        desc_start = full_text.find("Description Qty / UOM")
-        if desc_start == -1:
-            desc_start = full_text.find("Description")
-        sub_start = full_text.find("Subtotal", desc_start)
-        raw_desc = full_text[desc_start:sub_start] if sub_start != -1 else full_text[desc_start:]
-        clean_desc = clean_description_block(raw_desc)
+        if "BILL TO PROPERTY" in full_text:
+            tot_match = re.search(r'Total\s*\$?([\d,]+\.\d{2})\s+\$?([\d,]+\.\d{2})', full_text)
+            if tot_match:
+                unit_price = float(tot_match.group(1).replace(',', ''))
+                tax_amt = float(tot_match.group(2).replace(',', ''))
+                if tax_amt > 0:
+                    has_tax = "Yes"
+            else:
+                amt_match = re.search(r'EXT PRICE\s*\n?\s*\$?([\d,]+\.\d{2})', full_text)
+                if amt_match:
+                    unit_price = float(amt_match.group(1).replace(',', ''))
+        else:
+            sub_match = re.search(r'Subtotal\s*\$?([\d,]+\.\d{2})', full_text)
+            unit_price = float(sub_match.group(1).replace(',', '')) if sub_match else 0.0
+
+            tax_match = re.search(r'Sales Tax\s*\$?([\d,]+\.\d{2})', full_text)
+            if tax_match:
+                t_val = float(tax_match.group(1).replace(',', ''))
+                if t_val > 0:
+                    has_tax = "Yes"
+
+        # Description
+        clean_desc = ""
+        if "BILL TO PROPERTY" in full_text:
+            start_desc = full_text.find("Please detach top portion and return with your payment.")
+            if start_desc != -1:
+                start_desc += len("Please detach top portion and return with your payment.")
+            else:
+                start_desc = full_text.find("QTY ITEM")
+                if start_desc != -1:
+                    start_desc += len("QTY ITEM")
+
+            end_desc = full_text.find("Total", start_desc)
+            if end_desc == -1:
+                end_desc = full_text.find("UNIT PRICE", start_desc)
+
+            raw_desc = full_text[start_desc:end_desc] if end_desc != -1 else full_text[start_desc:]
+            lines = raw_desc.split('\n')
+            c_lines = []
+            for l in lines:
+                s = l.strip()
+                if not s or "QTY ITEM" in s or "UNIT PRICE" in s or "EXT PRICE" in s:
+                    continue
+                if re.match(r'^\$?[\d,]+\.\d{2}(\s+\$?[\d,]+\.\d{2})*$', s):
+                    continue
+                s = re.sub(r'\s+\$?[\d,]+\.\d{2}.*$', '', s).strip()
+                if s:
+                    c_lines.append(s)
+            clean_desc = "\n".join(c_lines)
+        else:
+            desc_start = full_text.find("Description Qty / UOM")
+            if desc_start == -1:
+                desc_start = full_text.find("Description")
+            sub_start = full_text.find("Subtotal", desc_start)
+            raw_desc = full_text[desc_start:sub_start] if sub_start != -1 else full_text[desc_start:]
+            clean_desc = clean_description(raw_desc)
 
         records.append({
             "Post": "Yes",
@@ -150,7 +230,7 @@ def create_excel(records):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Invoice Import"
-    
+
     headers = [
         "Post", "Invoice Date", "Due Date", "Invoice Number", "Transaction Type",
         "Customer", "Vendor", "Currency Code", "Products/Services", "Description",
@@ -177,7 +257,7 @@ def create_excel(records):
         ws.append(row_values)
         fill_color = "F9FAFC" if row_idx % 2 == 0 else "FFFFFF"
         row_fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
-        
+
         for col_idx, cell in enumerate(ws[row_idx], start=1):
             cell.fill = row_fill
             cell.border = thin_border
@@ -207,11 +287,11 @@ def create_excel(records):
 if uploaded_file is not None:
     with st.spinner("Processing PDF and extracting line items..."):
         data = parse_invoices(uploaded_file.read())
-        
+
     if data:
         st.success(f"Successfully processed {len(data)} invoices!")
         excel_data = create_excel(data)
-        
+
         st.download_button(
             label="📥 Download Excel Spreadsheet",
             data=excel_data,
