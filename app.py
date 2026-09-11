@@ -1,17 +1,15 @@
 import streamlit as st
 import pypdf
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from io import BytesIO
+import csv
+from io import BytesIO, StringIO
 import re
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Invoice to Excel Converter", page_icon="📑", layout="wide")
+st.set_page_config(page_title="Invoice to CSV Converter", page_icon="📑", layout="wide")
 
-st.title("📑 Landscaping Invoice to Excel Converter")
-st.caption("🚀 Version 2.5 — mm/dd/yyyy Date Formatting Active")
-st.write("Upload an invoice PDF to extract line items and export directly into your accounting import spreadsheet.")
+st.title("📑 Landscaping Invoice to CSV Converter")
+st.caption("🚀 Version 2.6 — Direct CSV Export Active")
+st.write("Upload an invoice PDF to extract line items and export directly into your accounting import CSV file.")
 
 uploaded_file = st.file_uploader("Choose an Invoice PDF", type=["pdf"])
 
@@ -236,7 +234,7 @@ def parse_invoices(pdf_bytes):
             "Description": clean_desc,
             "Qty": 1,
             "Discount %": "",
-            "Unit Price": unit_price,
+            "Unit Price": f"{unit_price:.2f}",
             "Category": "",
             "Location": "",
             "Class": "",
@@ -245,63 +243,19 @@ def parse_invoices(pdf_bytes):
 
     return records
 
-def create_excel(records):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Invoice Import"
-
+def create_csv(records):
+    """Generates standard UTF-8 CSV string with all headers intact."""
     headers = [
         "Post", "Invoice Date", "Due Date", "Invoice Number", "Transaction Type",
         "Customer", "Vendor", "Currency Code", "Products/Services", "Description",
         "Qty", "Discount %", "Unit Price", "Category", "Location", "Class", "Tax"
     ]
-    ws.append(headers)
-
-    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    thin_border = Border(
-        left=Side(style='thin', color='D9D9D9'),
-        right=Side(style='thin', color='D9D9D9'),
-        top=Side(style='thin', color='D9D9D9'),
-        bottom=Side(style='thin', color='D9D9D9')
-    )
-
-    for cell in ws[1]:
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for row_idx, r in enumerate(records, start=2):
-        row_values = [r[h] for h in headers]
-        ws.append(row_values)
-        fill_color = "F9FAFC" if row_idx % 2 == 0 else "FFFFFF"
-        row_fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
-
-        for col_idx, cell in enumerate(ws[row_idx], start=1):
-            cell.fill = row_fill
-            cell.border = thin_border
-            cell.font = Font(name="Calibri", size=10)
-            col_name = headers[col_idx - 1]
-            if col_name in ["Post", "Transaction Type", "Qty", "Tax", "Invoice Date", "Due Date", "Invoice Number"]:
-                cell.alignment = Alignment(horizontal="center", vertical="top")
-            elif col_name == "Unit Price":
-                cell.number_format = '$#,##0.00'
-                cell.alignment = Alignment(horizontal="right", vertical="top")
-            elif col_name == "Description":
-                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-            else:
-                cell.alignment = Alignment(horizontal="left", vertical="top")
-
-    for col in ws.columns:
-        col_letter = get_column_letter(col[0].column)
-        max_len = max(len(str(cell.value or '').split('\n')[0]) for cell in col)
-        ws.column_dimensions[col_letter].width = max(min(max_len + 4, 42), 12)
-    ws.column_dimensions['J'].width = 50
-
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers, quoting=csv.QUOTE_MINIMAL)
+    writer.writeheader()
+    for row in records:
+        writer.writerow(row)
+    return output.getvalue().encode('utf-8')
 
 if uploaded_file is not None:
     with st.spinner("Processing PDF and extracting line items..."):
@@ -310,23 +264,23 @@ if uploaded_file is not None:
     if data:
         st.success(f"Successfully processed {len(data)} invoices!")
         
-        # Display preview table with dates, customer, and amounts
+        # Display preview table
         preview_data = [{
             "Invoice #": r["Invoice Number"], 
             "Invoice Date": r["Invoice Date"],
             "Due Date": r["Due Date"],
             "Customer": r["Customer"], 
-            "Amount": f"${r['Unit Price']:,.2f}"
+            "Amount": f"${float(r['Unit Price']):,.2f}"
         } for r in data]
         st.table(preview_data)
         
-        excel_data = create_excel(data)
+        csv_data = create_csv(data)
 
         st.download_button(
-            label="📥 Download Excel Spreadsheet",
-            data=excel_data,
-            file_name="Extracted_Invoices.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            label="📥 Download CSV File",
+            data=csv_data,
+            file_name="Extracted_Invoices.csv",
+            mime="text/csv"
         )
     else:
         st.error("No invoice data found in the uploaded file.")
