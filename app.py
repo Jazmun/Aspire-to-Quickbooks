@@ -10,18 +10,19 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Invoice to Excel Converter", page_icon="📑", layout="wide")
 
 st.title("📑 Landscaping Invoice to Excel Converter")
+st.caption("🚀 Version 2.2 — m/d/yy Date Formatting Active")
 st.write("Upload an invoice PDF to extract line items and export directly into your accounting import spreadsheet.")
 
 uploaded_file = st.file_uploader("Choose an Invoice PDF", type=["pdf"])
 
 def extract_invoice_number(text):
     """Detects invoice number across different template styles."""
-    # Alternate layout (e.g. Date Invoice No. \n 09/10/26 1246)
-    m2 = re.search(r'Invoice\s+No\.\s*\n\s*(?:[0-9/]+\s+)?(\d+)', text, re.IGNORECASE)
+    # Alternate layout: Date Invoice No. \n 09/10/26 1246 OR Invoice No. 1246
+    m2 = re.search(r'Invoice\s*(?:No\.?|#)?\s*(?:\n|\s)+(?:[0-9/]+\s+)?(\d{4,})', text, re.IGNORECASE)
     if m2:
         return m2.group(1)
-    # Standard layout (e.g. Invoice 1245)
-    m1 = re.search(r'Invoice\s+(\d+)', text)
+    # Standard layout: Invoice 1245
+    m1 = re.search(r'Invoice\s+(\d{4,})', text, re.IGNORECASE)
     if m1:
         return m1.group(1)
     return None
@@ -46,14 +47,31 @@ def clean_description(desc_text):
         cleaned.append(s)
     return "\n".join(cleaned)
 
+def parse_date(date_str):
+    """Parses various date string formats and returns a datetime object."""
+    date_str = date_str.strip()
+    for fmt in ("%m/%d/%y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            pass
+    return None
+
+def format_to_mdyy(dt):
+    """Formats datetime object to m/d/yy format without leading zeroes."""
+    if isinstance(dt, datetime):
+        return f"{dt.month}/{dt.day}/{dt.strftime('%y')}"
+    return str(dt)
+
 def parse_invoices(pdf_bytes):
     reader = pypdf.PdfReader(BytesIO(pdf_bytes))
     invoices = []
     current_inv = None
 
-    for page in reader.pages:
+    for idx, page in enumerate(reader.pages):
         text = page.extract_text() or ""
         inv_num = extract_invoice_number(text)
+        
         if inv_num:
             if current_inv:
                 invoices.append(current_inv)
@@ -82,30 +100,31 @@ def parse_invoices(pdf_bytes):
         f2_due = re.search(r'Due\s+Date\s*\n\s*.*?\s*([0-9]{1,2}/[0-9]{1,2}/[0-9]{2,4})', full_text, re.IGNORECASE)
 
         if f2_date:
-            try:
-                dt = datetime.strptime(f2_date.group(1).strip(), "%m/%d/%y")
-                inv_date_str = f"{dt.month}/{dt.day}/{dt.year}"
-            except:
+            dt = parse_date(f2_date.group(1))
+            if dt:
+                inv_date_str = format_to_mdyy(dt)
+            else:
                 inv_date_str = f2_date.group(1).strip()
+
             if f2_due:
-                try:
-                    due_dt = datetime.strptime(f2_due.group(1).strip(), "%m/%d/%y")
-                    due_date_str = f"{due_dt.month}/{due_dt.day:02d}/{due_dt.year}"
-                except:
+                due_dt = parse_date(f2_due.group(1))
+                if due_dt:
+                    due_date_str = format_to_mdyy(due_dt)
+                else:
                     due_date_str = f2_due.group(1).strip()
         else:
             # Format 1 (Standard layout)
             date_match = re.search(r'Date\s+PO#\s*\n\s*([0-9/]+)', full_text)
             if date_match:
-                try:
-                    dt = datetime.strptime(date_match.group(1).strip(), "%m/%d/%y")
-                    inv_date_str = f"{dt.month}/{dt.day}/{dt.year}"
+                dt = parse_date(date_match.group(1))
+                if dt:
+                    inv_date_str = format_to_mdyy(dt)
                     if "Due on Receipt" in full_text:
-                        due_date_str = f"{dt.month}/{dt.day:02d}/{dt.year}"
+                        due_date_str = inv_date_str
                     else:
                         due_dt = dt + timedelta(days=30)
-                        due_date_str = f"{due_dt.month}/{due_dt.day:02d}/{due_dt.year}"
-                except:
+                        due_date_str = format_to_mdyy(due_dt)
+                else:
                     inv_date_str = date_match.group(1).strip()
                     due_date_str = inv_date_str
 
@@ -290,6 +309,17 @@ if uploaded_file is not None:
 
     if data:
         st.success(f"Successfully processed {len(data)} invoices!")
+        
+        # Display preview table with dates, customer, and amounts
+        preview_data = [{
+            "Invoice #": r["Invoice Number"], 
+            "Invoice Date": r["Invoice Date"],
+            "Due Date": r["Due Date"],
+            "Customer": r["Customer"], 
+            "Amount": f"${r['Unit Price']:,.2f}"
+        } for r in data]
+        st.table(preview_data)
+        
         excel_data = create_excel(data)
 
         st.download_button(
