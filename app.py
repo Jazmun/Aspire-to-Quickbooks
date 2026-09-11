@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Invoice to Excel Converter", page_icon="📑", layout="wide")
 
 st.title("📑 Landscaping Invoice to Excel Converter")
-st.caption("🚀 Version 2.2 — m/d/yy Date Formatting Active")
+st.caption("🚀 Version 2.3 — mm/dd/yyyy Date Formatting Active")
 st.write("Upload an invoice PDF to extract line items and export directly into your accounting import spreadsheet.")
 
 uploaded_file = st.file_uploader("Choose an Invoice PDF", type=["pdf"])
@@ -57,10 +57,10 @@ def parse_date(date_str):
             pass
     return None
 
-def format_to_mdyy(dt):
-    """Formats datetime object to m/d/yy format without leading zeroes."""
+def format_to_mmddyyyy(dt):
+    """Formats datetime object to mm/dd/yyyy format with leading zeros and 4-digit year."""
     if isinstance(dt, datetime):
-        return f"{dt.month}/{dt.day}/{dt.strftime('%y')}"
+        return dt.strftime("%m/%d/%Y")
     return str(dt)
 
 def parse_invoices(pdf_bytes):
@@ -102,14 +102,14 @@ def parse_invoices(pdf_bytes):
         if f2_date:
             dt = parse_date(f2_date.group(1))
             if dt:
-                inv_date_str = format_to_mdyy(dt)
+                inv_date_str = format_to_mmddyyyy(dt)
             else:
                 inv_date_str = f2_date.group(1).strip()
 
             if f2_due:
                 due_dt = parse_date(f2_due.group(1))
                 if due_dt:
-                    due_date_str = format_to_mdyy(due_dt)
+                    due_date_str = format_to_mmddyyyy(due_dt)
                 else:
                     due_date_str = f2_due.group(1).strip()
         else:
@@ -118,12 +118,12 @@ def parse_invoices(pdf_bytes):
             if date_match:
                 dt = parse_date(date_match.group(1))
                 if dt:
-                    inv_date_str = format_to_mdyy(dt)
+                    inv_date_str = format_to_mmddyyyy(dt)
                     if "Due on Receipt" in full_text:
                         due_date_str = inv_date_str
                     else:
                         due_dt = dt + timedelta(days=30)
-                        due_date_str = format_to_mdyy(due_dt)
+                        due_date_str = format_to_mmddyyyy(due_dt)
                 else:
                     inv_date_str = date_match.group(1).strip()
                     due_date_str = inv_date_str
